@@ -10,7 +10,7 @@ from subject_layers.Transformer_EncDec import Encoder, EncoderLayer
 from subject_layers.SelfAttention_Family import FullAttention, AttentionLayer
 from subject_layers.Embed import DataEmbedding
 from debug_util import entropy  # 你代码中用到了 entropy 函数
-
+from semantic_bridge_plugin import CrossModalBridgePlugin
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ==========================================
@@ -66,7 +66,7 @@ class iTransformer(nn.Module):
         enc_out = enc_out[:, :63, :]
         return enc_out
 
-class STNSAM_new(nn.Module):
+class STAM(nn.Module):
     """
     终极优化版：移除会导致时域振铃的硬掩码频段注意力。
     专注于：频域特征驱动的通道注意力 + 时域卷积驱动的时间注意力。
@@ -200,105 +200,7 @@ class Proj_eeg(nn.Sequential):
             nn.LayerNorm(proj_dim),
         )
 
-# ==========================================
-# 特征路由与注意力模块
-# ==========================================
-
-class MADRAttention(nn.Module):
-    def __init__(self, dim, num_heads=16, modal_count=2, hidden=128, dropout=0.1):
-        super().__init__()
-        assert dim % num_heads == 0
-        self.dim = dim; self.H = num_heads; self.d = dim // num_heads
-        self.modal_count = modal_count
-        self.q_proj = nn.Linear(dim, dim)
-        self.k_projs = nn.ModuleList([nn.Linear(dim, dim) for _ in range(modal_count)])
-        self.v_projs = nn.ModuleList([nn.Linear(dim, dim) for _ in range(modal_count)])
-        self.out_proj = nn.Linear(dim, dim)
-        self.attn_drop = nn.Dropout(dropout)
-        self.proj_drop = nn.Dropout(dropout)
-        self.route_mlp = nn.Sequential(
-            nn.Linear(dim, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, self.H * modal_count)
-        )
-        nn.init.zeros_(self.route_mlp[-1].bias)
-
-    def forward(self, q, modal_kvs):
-        B, M, D = q.shape
-        Q = self.q_proj(q).view(B, M, self.H, self.d).transpose(1, 2)  # [B,H,M,d]
-
-        if isinstance(modal_kvs, torch.Tensor):
-            modal_list = [modal_kvs[:, i:i+1, :] for i in range(modal_kvs.shape[1])]
-        else:
-            modal_list = list(modal_kvs)
-
-        actual_modal_count = len(modal_list)
-        if actual_modal_count != self.modal_count:
-            self.modal_count = actual_modal_count
-
-        Ks, Vs = [], []
-        for i, kv in enumerate(modal_list):
-            Ni = kv.shape[1]
-            K = self.k_projs[i](kv).view(B, Ni, self.H, self.d).transpose(1, 2)
-            V = self.v_projs[i](kv).view(B, Ni, self.H, self.d).transpose(1, 2)
-            Ks.append(K); Vs.append(V)
-        
-        pooled = q.mean(dim=1)  # [B,D]
-        route_logits = self.route_mlp(pooled).view(B, self.H, self.modal_count)
-        route_w = F.softmax(route_logits, dim=-1)  # [B,H,modal]
-        self.last_route_w = route_w.detach()
-        
-        score_chunks = []
-        for i in range(self.modal_count):
-            K = Ks[i]  
-            s = (Q @ K.transpose(-2, -1)) / (self.d ** 0.5)
-            w = route_w[:, :, i].unsqueeze(-1).unsqueeze(-1)
-            score_chunks.append(s * w)
-
-        scores = torch.cat(score_chunks, dim=-1)  # [B,H,M,sumNi]
-        attn = F.softmax(scores, dim=-1)
-        attn = self.attn_drop(attn)
-
-        V_cat = torch.cat(Vs, dim=2)  # [B,H,sumNi,d]
-        out = attn @ V_cat   # [B,H,M,d]
-        out = out.transpose(1, 2).contiguous().view(B, M, D)
-        out = self.out_proj(out)
-        out = self.proj_drop(out)
-        return out, route_w, attn
-
-class CrossModalBlock(nn.Module):
-    def __init__(self, dim, n_heads=16, modal_count=2, dropout=0.1):
-        super().__init__()
-        self.attn = MADRAttention(dim, num_heads=n_heads, modal_count=modal_count)
-        self.norm1 = nn.LayerNorm(dim)
-        self.ffn = nn.Sequential(
-            nn.Linear(dim, dim*4),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(dim*4, dim),
-            nn.Dropout(0.1),
-        )
-        self.norm2 = nn.LayerNorm(dim)
-        self.dropout = nn.Dropout(dropout)
-        
-    def forward(self, q, modal_kvs):
-        q_norm = self.norm1(q)
-        out, route_w, attn = self.attn(q_norm, modal_kvs)
-        
-        x = q + out
-        x = self.norm2(x + self.dropout(self.ffn(x)))
-        
-        with torch.no_grad():
-            attn_max = attn.max(dim=-1).values.mean()
-            attn_ent = entropy(attn, dim=-1).mean()
-            
-        return x, route_w, attn_max.detach(), attn_ent.detach()
-
-# ==========================================
-# 顶层架构 (STAMBRIDGE)
-# ==========================================
-
-class NeuralMCRL(nn.Module):
+class STAMEncoder(nn.Module):
     def __init__(self, num_visual_classes=1654, num_channels=63, sequence_length=250, num_subjects=10, num_latents=1024):
         super(NeuralMCRL, self).__init__()
         default_config = Config()
@@ -309,7 +211,7 @@ class NeuralMCRL(nn.Module):
             init_id=True
         )
         self.encoder = iTransformer(default_config)
-        self.nsam = STNSAM_new(
+        self.nsam = STAM(
             num_channels=num_channels,
             seq_length=sequence_length,
             sampling_rate=250.0
@@ -317,126 +219,14 @@ class NeuralMCRL(nn.Module):
         self.feature_norm = nn.LayerNorm([num_channels, sequence_length])
         self.enc_eeg = Enc_eeg()
         self.proj = nn.Linear(1440, 1024)
+        self.proj_eeg = Proj_eeg()
 
     def forward(self, x, subject_ids, text_features=None, img_features=None, depth_features=None):
         x = self.subject_layer(x, subject_ids)
         x_trans = self.encoder(x, None, subject_ids)
         x_trans = self.nsam(x_trans)
         x_normalized = self.feature_norm(x_trans)
-        eeg_features = self.enc_eeg(x_normalized)
-        eeg_features = self.proj(eeg_features)
-        return eeg_features
-
-class RouteModel(nn.Module):
-    def __init__(self, sequence_length=250, num_subjects=10, embedding_dim=1024, proj_dim=1024):
-        super(RouteModel, self).__init__()
-        self.mcrl = NeuralMCRL(num_subjects=num_subjects, sequence_length=sequence_length)
-        
-        self.cross_layers_forward = nn.ModuleList([
-             CrossModalBlock(dim=proj_dim, n_heads=8, modal_count=2) for _ in range(2)
-        ])
-        self.cross_layers_backward = nn.ModuleList([
-             CrossModalBlock(dim=proj_dim, n_heads=16, modal_count=2) for _ in range(4)
-        ])
-        
-        # Semantic mapping headers
-        self.global_mlabel_train = nn.Sequential(
-            nn.Linear(proj_dim, proj_dim//2),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(proj_dim//2, 1654)
-        )
-        self.global_mlabel_test = nn.Sequential(
-            nn.Linear(proj_dim, proj_dim//2),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(proj_dim//2, 200)
-        )
-        
-        # Redundant projections
-        self.proj_eeg1 = Proj_eeg()
-        self.proj_eeg2 = Proj_eeg()
-        self.proj_eeg3 = Proj_eeg()
-
-    def forward_cross(self, q, kv):
-        x = q
-        rws = []; amax = []; aent = []
-        for layer in self.cross_layers_forward:
-            out = layer(x, kv)
-            if isinstance(out, tuple):
-                x_out, rw, amx, aen = out
-                rws.append(rw.detach())
-                amax.append(amx.detach())
-                aent.append(aen.detach())
-            else:
-                x_out = out
-            x = x_out
-            
-        dbg = {}
-        if rws:
-            R = torch.stack(rws, 0)  # [L,B,H,M]
-            dbg["fw_route_w_mean"] = R.mean().item()
-            dbg["fw_route_w_varH"] = R.var(dim=2).mean().item()
-            dbg["fw_attn_max"]     = torch.stack(amax,0).mean().item()
-            dbg["fw_attn_entropy"] = torch.stack(aent,0).mean().item()
-        return x.squeeze(1), dbg
-    
-    def backward_cross(self, qs, kv):
-        x = torch.cat(qs, dim=1)
-        rws = []; amax = []; aent = []
-        for layer in self.cross_layers_backward:
-            out = layer(x, kv)
-            if isinstance(out, tuple):
-                x_out, rw, amx, aen = out
-                rws.append(rw.detach())
-                amax.append(amx.detach())
-                aent.append(aen.detach())
-            else:
-                x_out = out
-            x = x_out
-            
-        dbg = {}
-        if rws:
-            R = torch.stack(rws, 0)
-            dbg["bw_route_w_mean"] = R.mean().item()
-            dbg["bw_route_w_varH"] = R.var(dim=2).mean().item()
-            dbg["bw_attn_max"]     = torch.stack(amax,0).mean().item()
-            dbg["bw_attn_entropy"] = torch.stack(aent,0).mean().item()
-        return x.mean(1), dbg
-
-    def forward(self, eeg, subject_ids, img_features, text_features, use_gating=False):
-        img_features = img_features.to(eeg.device)
-        text_features = text_features.to(eeg.device)
-    
-        z_eeg = self.mcrl(eeg, subject_ids, None, None, None)  # [B, D]
-        
-        # Redundant projection heads
-        z_eeg1 = self.proj_eeg1(z_eeg)
-        z_eeg2 = self.proj_eeg2(z_eeg)
-        z_eeg3 = self.proj_eeg3(z_eeg)
-    
-        eeg_img = z_eeg1
-        eeg_text = z_eeg2
-        eeg_dep = z_eeg3
-    
-        # Forward Routing (EEG query attending to Image & Text)
-        kv = [img_features.unsqueeze(1), text_features.unsqueeze(1)]
-        f1, dbg_fw = self.forward_cross((z_eeg.detach()).unsqueeze(1), kv)
-        
-        # Backward Routing (Image & Text queries attending to EEG)
-        eeg_img_detach = z_eeg.detach()
-        kv_eeg = [eeg_img_detach.unsqueeze(1), eeg_img_detach.unsqueeze(1)]
-        f2, dbg_bw = self.backward_cross([img_features.unsqueeze(1), text_features.unsqueeze(1)], kv_eeg)
-        
-        # Dummy variables previously expected by your training loop return signature
-        cycle_loss1 = cycle_loss2 = fuzzy_loss1 = fuzzy_loss2 = recon_eeg1 = 0
-        dummy_gates = weight_reg = 0
-        
-        if self.training:
-            semantic_logits = self.global_mlabel_train(f2)
-        else:
-            semantic_logits = self.global_mlabel_test(f2)
-            
-        return (z_eeg1, (eeg_img, eeg_text, eeg_dep), semantic_logits, 
-                dummy_gates, weight_reg, cycle_loss1, cycle_loss2, 
-                fuzzy_loss1, fuzzy_loss2, dbg_fw, dbg_bw, f1, f2, recon_eeg1)
+        enc_eeg = self.enc_eeg(x_normalized)
+        z_eeg = self.proj(enc_eeg)
+        eeg_features = self.proj_eeg(z_eeg)
+        return z_eeg,eeg_features
