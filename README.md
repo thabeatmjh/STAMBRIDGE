@@ -1,8 +1,5 @@
 # STAMBRIDGE: Spectral-Temporal Adaptive Mid-Feature Bridge for Stable EEG Visual Decoding
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
-This is the official PyTorch implementation of the paper **"STAMBRIDGE: Spectral-Temporal Adaptive Mid-Feature Bridge for Stable EEG Visual Decoding"**.
 
 ## 📖 Abstract
 
