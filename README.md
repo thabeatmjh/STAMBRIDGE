@@ -1,6 +1,9 @@
 # STAMBRIDGE: Spectral-Temporal Adaptive Mid-Feature Bridge for Stable EEG Visual Decoding
 
-
+<div align="center">
+<img src="imgs/fig_overall.png" alt="STAMBRIDGE Framework" style="max-width: 90%; height: auto;"/>
+<p>Overall framework of our proposed STAMBRIDGE model, illustrating the Spectral-Temporal Adaptive Module (STAM) and the Mid-Feature Semantic Bridge (MFSB).</p>
+</div>
 ## 📖 Abstract
 
 Electroencephalography (EEG) visual decoding remains challenging due to the modality gap between low-SNR neural signals and highly structured vision-language spaces. To address this, we propose **STAMBRIDGE**, a versatile two-stage framework that sequentially tackles feature conditioning and cross-modal alignment:
