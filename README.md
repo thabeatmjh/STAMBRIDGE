@@ -13,10 +13,6 @@ Electroencephalography (EEG) visual decoding remains challenging due to the moda
 
 STAMBRIDGE achieves state-of-the-art 200-way zero-shot retrieval performance on the THINGS-EEG benchmark, with **34.50% Top-1** and **65.95% Top-5** accuracy. 
 
-## 🧠 Architecture Data Flow
-
-To effectively capture the spatio-temporal dynamics of neural signals and explicitly protect feature integrity, our encoding pipeline strictly follows this logic: 
-**Multichannel EEG $\rightarrow$ Frozen Subject Adaptation $\rightarrow$ iTransformer blocks $\rightarrow$ STAM module.**
 
 ## 📂 Repository Structure
 
@@ -32,13 +28,19 @@ Based on the current repository, the main components are organized as follows:
 * `loss.py`: Implementation of the InfoNCE and CLIP loss functions.
 * `util.py` / `debug_util.py`: Utility functions for logging (e.g., Weights & Biases) and debugging.
 
-## 🚀 Getting Started
+## ⚙️ Environment Setup
 
-### 1. Environment Setup
+We recommend using a dedicated Python environment.
 
-Clone the repository and install the required dependencies:
-
+### 1. Create a conda environment
 ```bash
-git clone [https://github.com/YourUsername/YourRepoName.git](https://github.com/YourUsername/YourRepoName.git)
-cd YourRepoName
+conda create -n stambridge python=3.10 -y
+conda activate stambridge
+
+### 2. Install PyTorch
+Please install a CUDA-compatible PyTorch version according to your local system.
+For example, with CUDA 12.1:
+pip install torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1
+
+### 3. Install the remaining dependencies
 pip install -r requirements.txt
