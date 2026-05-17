@@ -146,7 +146,7 @@ class DataEmbedding(nn.Module):
             x = self.value_embedding(x)
 
         # Always add positional embedding (important for EEG sequence modeling)
-        x = x + self.position_embedding(x)
+        # x = x + self.position_embedding(x)
         
         # Only add temporal embedding when x_mark is provided (for time-series with calendar features)
         if x_mark is not None:
