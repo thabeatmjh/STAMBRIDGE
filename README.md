@@ -8,7 +8,7 @@
 ## 📖 Abstract
 
 Electroencephalography (EEG) visual decoding remains challenging due to the modality gap between low-SNR neural signals and highly structured vision-language spaces. To address this, we propose **STAMBRIDGE**, a versatile two-stage framework that sequentially tackles feature conditioning and cross-modal alignment:
-1. **Spectral-Temporal Adaptive Module (STAM):** Replaces hard frequency masking with amplitude-derived soft channel weighting and multi-scale temporal convolutions, explicitly preserving frequency-aware transients while avoiding time-domain ringing artifacts.
+1. **Spectral-Temporal Amplitude-aware Modulation (STAM):** Replaces hard frequency masking with amplitude-derived soft channel weighting and multi-scale temporal convolutions, explicitly preserving frequency-aware transients while avoiding time-domain ringing artifacts.
 2. **Mid-Feature Semantic Bridge (MFSB):** A model-agnostic module that constructs a regularized intermediate space through directed cross-modal interactions, enabling staged distillation and more stable semantic alignment.
 
 STAMBRIDGE achieves state-of-the-art 200-way zero-shot retrieval performance on the THINGS-EEG benchmark, with **34.50% Top-1** and **65.95% Top-5** accuracy. 
