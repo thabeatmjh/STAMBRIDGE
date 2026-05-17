@@ -15,7 +15,7 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
 from STAMEncoder import STAMEncoder
-from eegdatasets_leaveone import EEGDataset
+from datasets import EEGDataset
 from util import wandb_logger
 from loss import ClipLoss
 
@@ -50,7 +50,7 @@ def train_model(sub, eeg_model, dataloader, optimizer, device, text_features_all
     correct = 0
     total = 0
     save_features= True
-    for batch_idx, (eeg_data, labels, text_features, img_features) in enumerate(dataloader):
+    for batch_idx, (eeg_data, labels, text_features, img_features,_,_) in enumerate(dataloader):
         eeg_data = eeg_data.to(device)
         text_features = text_features.to(device).float()
         img_features = img_features.to(device).float()
@@ -114,7 +114,7 @@ def evaluate_model(sub, eeg_model, dataloader, device, text_features_all, img_fe
     all_labels = set(range(text_features_all.size(0)))
     top5_acc = 0
     with torch.no_grad():
-        for batch_idx, (eeg_data, labels, text_features, img_features) in enumerate(dataloader):
+        for batch_idx, (eeg_data, labels, text_features, img_features,_,_) in enumerate(dataloader):
             eeg_data = eeg_data.to(device)
             text_features = text_features.to(device).float()
             labels = labels.to(device)
