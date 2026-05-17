@@ -2,7 +2,7 @@
 
 <div align="center">
 <img src="imgs/fig_overall.png" alt="STAMBRIDGE Framework" style="max-width: 90%; height: auto;"/>
-<p>Overall framework of our proposed STAMBRIDGE model, illustrating the Spectral-Temporal Adaptive Module (STAM) and the Mid-Feature Semantic Bridge (MFSB).</p>
+<p>Overall framework of our proposed STAMBRIDGE model, illustrating the Spectral-Temporal Amplitude-aware Modulation (STAM) and the Mid-Feature Semantic Bridge (MFSB).</p>
 </div>
 
 ## 📖 Abstract
