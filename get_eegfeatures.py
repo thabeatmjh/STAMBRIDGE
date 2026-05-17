@@ -6,7 +6,7 @@ from torch.nn import CrossEntropyLoss
 from torch.nn import functional as F
 from torch.optim import Adam
 from torch.utils.data import DataLoader
-from newmodel import STAMEncoder
+from STAMEncoder import STAMEncoder
 os.environ["WANDB_API_KEY"] = "KEY"
 os.environ["WANDB_MODE"] = 'offline'
 from itertools import combinations
