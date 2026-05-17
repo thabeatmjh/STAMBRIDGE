@@ -1,0 +1,372 @@
+import os
+
+import torch
+import torch.optim as optim
+from torch.nn import CrossEntropyLoss
+from torch.nn import functional as F
+from torch.optim import Adam
+from torch.utils.data import DataLoader
+from newmodel import STAMEncoder
+os.environ["WANDB_API_KEY"] = "KEY"
+os.environ["WANDB_MODE"] = 'offline'
+from itertools import combinations
+
+import clip
+import matplotlib.pyplot as plt
+import numpy as np
+import torch.nn as nn
+import torchvision.transforms as transforms
+import tqdm
+from datasets import EEGDataset
+
+from einops.layers.torch import Rearrange, Reduce
+
+from sklearn.metrics import confusion_matrix
+from torch.utils.data import DataLoader, Dataset
+import random
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from util import wandb_logger
+
+import csv
+from torch import Tensor
+import itertools
+import math
+import re
+from subject_layers.Transformer_EncDec import Encoder, EncoderLayer
+from subject_layers.SelfAttention_Family import FullAttention, AttentionLayer
+from subject_layers.Embed import DataEmbedding
+import numpy as np
+from loss import ClipLoss
+import argparse
+from torch import nn
+from torch.optim import AdamW
+
+
+class Config:
+    def __init__(self):
+        self.task_name = 'classification'  # Example task name
+        self.seq_len = 250                 # Sequence length
+        self.pred_len = 250                # Prediction length
+        self.output_attention = False      # Whether to output attention weights
+        self.d_model = 250                 # Model dimension
+        self.embed = 'timeF'               # Time encoding method
+        self.freq = 'h'                    # Time frequency
+        self.dropout = 0.25                # Dropout rate
+        self.factor = 1                    # Attention scaling factor
+        self.n_heads = 4                   # Number of attention heads
+        self.e_layers = 1                  # Number of encoder layers
+        self.d_ff = 256                    # Dimension of the feedforward network
+        self.activation = 'gelu'           # Activation function
+        self.enc_in = 63                   # Encoder input dimension (example value)
+
+class iTransformer(nn.Module):
+    def __init__(self, configs, joint_train=False,  num_subjects=10):
+        super(iTransformer, self).__init__()
+        self.task_name = configs.task_name
+        self.seq_len = configs.seq_len
+        self.pred_len = configs.pred_len
+        self.output_attention = configs.output_attention
+        # Embedding
+        self.enc_embedding = DataEmbedding(configs.seq_len, configs.d_model, configs.embed, configs.freq, configs.dropout, joint_train=False, num_subjects=num_subjects)
+        # Encoder
+        self.encoder = Encoder(
+            [
+                EncoderLayer(
+                    AttentionLayer(
+                        FullAttention(False, configs.factor, attention_dropout=configs.dropout, output_attention=configs.output_attention),
+                        configs.d_model, configs.n_heads
+                    ),
+                    configs.d_model,
+                    configs.d_ff,
+                    dropout=configs.dropout,
+                    activation=configs.activation
+                ) for l in range(configs.e_layers)
+            ],
+            norm_layer=torch.nn.LayerNorm(configs.d_model)
+        )
+
+    def forward(self, x_enc, x_mark_enc, subject_ids=None):
+        # Embedding
+        enc_out = self.enc_embedding(x_enc, x_mark_enc, subject_ids)
+        enc_out, attns = self.encoder(enc_out, attn_mask=None)
+        enc_out = enc_out[:, :63, :]      
+        # print("enc_out", enc_out.shape)
+        return enc_out
+
+class PatchEmbedding(nn.Module):
+    def __init__(self, emb_size=40):
+        super().__init__()
+        # Revised from ShallowNet
+        self.tsconv = nn.Sequential(
+            nn.Conv2d(1, 40, (1, 25), stride=(1, 1)),
+            nn.AvgPool2d((1, 51), (1, 5)),
+            nn.BatchNorm2d(40),
+            nn.ELU(),
+            nn.Conv2d(40, 40, (63, 1), stride=(1, 1)),
+            nn.BatchNorm2d(40),
+            nn.ELU(),
+            nn.Dropout(0.5),
+        )
+
+        self.projection = nn.Sequential(
+            nn.Conv2d(40, emb_size, (1, 1), stride=(1, 1)),  
+            Rearrange('b e (h) (w) -> b (h w) e'),
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        # b, _, _, _ = x.shape
+        x = x.unsqueeze(1)     
+        # print("x", x.shape)   
+        x = self.tsconv(x)
+        # print("tsconv", x.shape)   
+        x = self.projection(x)
+        # print("projection", x.shape)  
+        return x
+
+class ResidualAdd(nn.Module):
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
+
+    def forward(self, x, **kwargs):
+        res = x
+        x = self.fn(x, **kwargs)
+        x += res
+        return x
+
+class FlattenHead(nn.Sequential):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        x = x.contiguous().view(x.size(0), -1)
+        return x
+
+class Enc_eeg(nn.Sequential):
+    def __init__(self, emb_size=40, **kwargs):
+        super().__init__(
+            PatchEmbedding(emb_size),
+            FlattenHead()
+        )
+
+class Proj_eeg(nn.Sequential):
+    def __init__(self, embedding_dim=1440, proj_dim=1024, drop_proj=0.5):
+        super().__init__(
+            nn.Linear(embedding_dim, proj_dim),
+            ResidualAdd(nn.Sequential(
+                nn.GELU(),
+                nn.Linear(proj_dim, proj_dim),
+                nn.Dropout(drop_proj),
+            )),
+            nn.LayerNorm(proj_dim),
+        )
+
+class ATMS(nn.Module):    
+    def __init__(self, num_channels=63, sequence_length=25, num_subjects=1, num_features=64, num_latents=1024, num_blocks=1):
+        super(ATMS, self).__init__()
+        default_config = Config()
+        self.encoder = iTransformer(default_config)   
+        self.subject_wise_linear = nn.ModuleList([nn.Linear(default_config.d_model, sequence_length) for _ in range(num_subjects)])
+        self.enc_eeg = Enc_eeg()
+        self.proj_eeg = Proj_eeg()        
+        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        self.loss_func = ClipLoss()       
+        
+    def forward(self, x, subject_ids):
+        x = self.encoder(x, None, subject_ids)
+        # print(f'After attention shape: {x.shape}')
+        # print("x", x.shape)
+        # x = self.subject_wise_linear[0](x)
+        # print(f'After subject-specific linear transformation shape: {x.shape}')
+        eeg_embedding = self.enc_eeg(x)
+        
+        out = self.proj_eeg(eeg_embedding)
+        return out  
+
+def extract_id_from_string(s):
+    match = re.search(r'\d+$', s)
+    if match:
+        return int(match.group())-1
+    return None
+
+
+def get_eegfeatures_train(sub, model, dataloader, device, text_features_all, img_features_all, k):
+    # NOTE: This function in the original notebook has two issues:
+    # 1) It calls `eeg_model` inside but parameter is named `eegmodel`. Prefer using eegmodel consistently.
+    # 2) features_list is never appended to; attempting to torch.cat an empty list will crash.
+    # Before running, fix those issues (see comments below).
+    model.eval()
+    text_features_all = text_features_all.to(device).float()
+    img_features_all = img_features_all.to(device).float()
+    total_loss = 0
+    correct = 0
+    total = 0
+    alpha =0.9
+    top5_correct = 0
+    top5_correct_count = 0
+    loss_fn = ClipLoss()
+    all_labels = set(range(text_features_all.size(0)))
+    top5_acc = 0
+    mse_loss_fn = nn.MSELoss()
+    ridge_lambda = 0.1
+    save_features = True
+    features_list = []  # List to store features    
+    use_gating = True
+    with torch.no_grad():
+        for batch_idx,(eeg, labels, txt, img,depth,_) in enumerate(dataloader):
+            B = eeg.size(0)
+            eeg = eeg.to(device)
+            labels = labels.to(device)
+            txt = txt.to(device).float()
+            img = img.to(device).float()
+            batch_size = eeg.size(0)
+            subject_id = extract_id_from_string(sub)
+            subject_ids = torch.full((batch_size,), subject_id, dtype=torch.long).to(device)
+            # print(img_bank.shape)
+            # forward
+            z_eeg,eeg_features = eeg_model(eeg_data, subject_ids)
+            
+            # --- IMPORTANT: original notebook never appended eeg_features to features_list ---
+            # To save features later, append them here, e.g.:
+            features_list.append(eeg_features.cpu())
+            # (If you do this, ensure concatenation logic below matches expected shapes.)
+            
+            for idx, label in enumerate(labels):
+
+                possible_classes = list(all_labels - {label.item()})
+                selected_classes = random.sample(possible_classes, k-1) + [label.item()]
+                selected_img_features = img_features_all[selected_classes]
+                
+
+                logits_img = model.logit_scale_img * eeg_features[idx] @ selected_img_features.T
+                # logits_text = logit_scale * eeg_features[idx] @ selected_text_features.T
+                # logits_single = (logits_text + logits_img) / 2.0
+                logits_single = logits_img
+                # print("logits_single", logits_single.shape)
+
+                # predicted_label = selected_classes[torch.argmax(logits_single).item()]
+                predicted_label = selected_classes[torch.argmax(logits_single).item()] # (n_batch, ) \in {0, 1, ..., n_cls-1}
+                if predicted_label == label.item():
+                    correct += 1        
+                total += 1
+
+        if save_features:
+            # Ensure features_list is not empty before torch.cat
+            features_tensor = torch.cat(features_list, dim=0)
+            print("features_tensor", features_tensor.shape)
+            torch.save(features_tensor.cpu(), f"newmodel_eeg_features_{sub}_train.pt")  # Save features as .pt file
+    return features_tensor.cpu()
+def get_eegfeatures_test(sub, model, dataloader, device, text_features_all, img_features_all, k):
+    # NOTE: This function in the original notebook has two issues:
+    # 1) It calls `eeg_model` inside but parameter is named `eegmodel`. Prefer using eegmodel consistently.
+    # 2) features_list is never appended to; attempting to torch.cat an empty list will crash.
+    # Before running, fix those issues (see comments below).
+    model.eval()
+    text_features_all = text_features_all.to(device).float()
+    img_features_all = img_features_all.to(device).float()
+    total_loss = 0
+    correct = 0
+    total = 0
+    alpha =0.9
+    top5_correct = 0
+    top5_correct_count = 0
+    loss_fn = ClipLoss()
+    all_labels = set(range(text_features_all.size(0)))
+    top5_acc = 0
+    mse_loss_fn = nn.MSELoss()
+    ridge_lambda = 0.1
+    save_features = True
+    features_list = []  # List to store features    
+    use_gating = True
+    with torch.no_grad():
+        for batch_idx,(eeg, labels, txt, img,depth,_) in enumerate(dataloader):
+            B = eeg.size(0)
+            eeg = eeg.to(device)
+            labels = labels.to(device)
+            txt = txt.to(device).float()
+            img = img.to(device).float()
+            batch_size = eeg.size(0)
+            subject_id = extract_id_from_string(sub)
+            subject_ids = torch.full((batch_size,), subject_id, dtype=torch.long).to(device)
+            # print(img_bank.shape)
+            # forward
+            z_eeg,eeg_features = eeg_model(eeg_data, subject_ids)
+    
+            # --- IMPORTANT: original notebook never appended eeg_features to features_list ---
+            # To save features later, append them here, e.g.:
+            features_list.append(eeg_features.cpu())
+            # (If you do this, ensure concatenation logic below matches expected shapes.)
+            
+            for idx, label in enumerate(labels):
+
+                possible_classes = list(all_labels - {label.item()})
+                selected_classes = random.sample(possible_classes, k-1) + [label.item()]
+                selected_img_features = img_features_all[selected_classes]
+                
+
+                logits_img = model.logit_scale_img * eeg_features[idx] @ selected_img_features.T
+                # logits_text = logit_scale * eeg_features[idx] @ selected_text_features.T
+                # logits_single = (logits_text + logits_img) / 2.0
+                logits_single = logits_img
+                # print("logits_single", logits_single.shape)
+
+                # predicted_label = selected_classes[torch.argmax(logits_single).item()]
+                predicted_label = selected_classes[torch.argmax(logits_single).item()] # (n_batch, ) \in {0, 1, ..., n_cls-1}
+                if predicted_label == label.item():
+                    correct += 1        
+                total += 1
+
+        if save_features:
+            # Ensure features_list is not empty before torch.cat
+            features_tensor = torch.cat(features_list, dim=0)
+            print("features_tensor", features_tensor.shape)
+            torch.save(features_tensor.cpu(), f"newmodel_eeg_features_{sub}_test.pt")  # Save features as .pt file
+    return features_tensor.cpu()
+from IPython.display import Image, display
+config = {
+"data_path": "/root/autodl-tmp/EEG2Vision/Preprocessed_data_250Hz",
+"project": "train_pos_img_text_rep",
+"entity": "sustech_rethinkingbci",
+"name": "lr=3e-4_img_pos_pro_eeg",
+"lr": 3e-4,
+"epochs": 50,
+"batch_size": 1024,
+"logger": True,
+"encoder_type":'RouteModel',
+}
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+data_path = config['data_path']
+emb_img_test = torch.load('/root/autodl-tmp/new/ViT-H-14_img_features_test.pt')
+emb_img_train = torch.load('/root/autodl-tmp/new/ViT-H-14_img_features_train.pt')
+
+eeg_model = STAMEncoder(
+            sequence_length=250, 
+            num_subjects=10,  
+            embedding_dim=1024, 
+            proj_dim=1024  
+        ).to(device)
+print('number of parameters:', sum([p.numel() for p in eeg_model.parameters()]))
+
+#####################################################################################
+
+# eeg_model.load_state_dict(torch.load("/home/ldy/Workspace/Reconstruction/models/contrast/sub-08/01-30_00-44/40.pth"))
+eeg_model.load_state_dict(torch.load("/root/autodl-tmp/new/models/contrast/NeuralMCRL/sub-10/04-11_16-41/epoch29_sub-10_acc0.3750.pth"))
+eeg_model = eeg_model.to(device)
+sub = 'sub-10'
+#####################################################################################
+
+test_dataset = EEGDataset(data_path, subjects= [sub], train=False)
+test_loader = DataLoader(test_dataset, batch_size=config["batch_size"], shuffle=False, num_workers=0)
+text_features_test_all = test_dataset.text_features
+img_features_test_all = test_dataset.img_features
+eeg_features_test = get_eegfeatures_test(sub, eeg_model, test_loader, device, text_features_test_all, img_features_test_all,k=200)
+
+train_dataset = EEGDataset(data_path, subjects= [sub], train=True)
+train_loader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=False, num_workers=0)
+text_features_test_all = train_dataset.text_features
+img_features_test_all = train_dataset.img_features
+
+eeg_features_train = get_eegfeatures_train(sub, eeg_model, train_loader, device, text_features_test_all, img_features_test_all,k=200)
