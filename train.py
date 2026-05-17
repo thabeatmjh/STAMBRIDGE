@@ -14,7 +14,6 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
-# 假设这些是你本地的依赖文件
 from STAMEncoder import STAMEncoder
 from eegdatasets_leaveone import EEGDataset
 from util import wandb_logger
@@ -44,13 +43,12 @@ def make_class_prototypes(img_feats, samples_per_class=10):
 
 def train_model(sub, eeg_model, dataloader, optimizer, device, text_features_all, img_features_all, config, epoch):
     eeg_model.train()
+    loss_fn = ClipLoss()
     text_features_all = text_features_all.to(device).float() # (n_cls, d)
     img_features_all = (img_features_all[::10]).to(device).float()
     total_loss = 0
     correct = 0
     total = 0
-    alpha=0.99
-    features_list = []  # List to store features
     save_features= True
     for batch_idx, (eeg_data, labels, text_features, img_features) in enumerate(dataloader):
         eeg_data = eeg_data.to(device)
@@ -68,6 +66,7 @@ def train_model(sub, eeg_model, dataloader, optimizer, device, text_features_all
         #     subject_ids = torch.full((batch_size,), -1, dtype=torch.long).to(device)     
         z_eeg,eeg_features = eeg_model(eeg_data, subject_ids)
         logit_scale = eeg_model.logit_scale
+        l_img_main = loss_fn(eeg_features, img_features, logit_scale)
         f_mid_img2,loss_bridge,loss_distill = eeg_model.bridge_plugin(z_eeg, img_features,text_features, 0.4, logit_scale)
         lambda_0 = 0.99
         lambda_1 = 0.5
@@ -103,14 +102,12 @@ def train_model(sub, eeg_model, dataloader, optimizer, device, text_features_all
 
 def evaluate_model(sub, eeg_model, dataloader, device, text_features_all, img_features_all, k, config):
     eeg_model.eval()
-
-    
+    loss_fn = ClipLoss()   
     text_features_all = text_features_all.to(device).float()
     img_features_all = img_features_all.to(device).float()
     total_loss = 0
     correct = 0
     total = 0
-    alpha = 0.99
     top5_correct = 0
     top5_correct_count = 0
     # Get all unique classes
@@ -132,11 +129,19 @@ def evaluate_model(sub, eeg_model, dataloader, device, text_features_all, img_fe
             z_eeg,eeg_features = eeg_model(eeg_data, subject_ids)
 
         
-            logit_scale = eeg_model.logit_scale 
-            # print(eeg_features.type, text_features.type, img_features.type)
-            img_loss = eeg_model.loss_func(eeg_features, img_features, logit_scale)
-            text_loss = eeg_model.loss_func(eeg_features, text_features, logit_scale)
-            loss = img_loss*alpha + text_loss*(1-alpha)
+            logit_scale = eeg_model.logit_scale
+            l_img_main = loss_fn(eeg_features, img_features, logit_scale)
+            f_mid_img2,loss_bridge,loss_distill = eeg_model.bridge_plugin(z_eeg, img_features,text_features, 0.4, logit_scale)
+            lambda_0 = 0.99
+            lambda_1 = 0.5
+            lambda_2 = 0.2 * min(1.0, (epoch - 5) / 15.0) if epoch >= 5 else 0.0
+    
+            loss = (
+                lambda_0 * l_img_main +
+                lambda_1 * loss_bridge +
+                lambda_2 * loss_distill
+            )
+
             
             total_loss += loss.item()
             
@@ -369,13 +374,13 @@ def main():
     parser.add_argument('--name', type=str, default="lr=3e-4_img_pos_pro_eeg", help='Experiment name')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
     parser.add_argument('--epochs', type=int, default=40, help='Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=512, help='Batch size')
     parser.add_argument('--logger', type=bool, default=True, help='Enable WandB logging')
     parser.add_argument('--gpu', type=str, default='cuda:0', help='GPU device to use')
     parser.add_argument('--device', type=str, choices=['cpu', 'gpu'], default='gpu', help='Device to run on (cpu or gpu)')    
     parser.add_argument('--insubject', type=bool, default=True, help='In-subject mode or cross-subject mode')
     parser.add_argument('--encoder_type', type=str, default='STAMEncoder', help='Encoder type')
-    parser.add_argument('--subjects', nargs='+', default=[ 'sub-09','sub-10'], help='List of subject IDs (default: sub-01 to sub-10)')    
+    parser.add_argument('--subjects', nargs='+', default=['sub-01', 'sub-02', 'sub-03', 'sub-04', 'sub-05', 'sub-06', 'sub-07', 'sub-08', 'sub-09', 'sub-10'], help='List of subject IDs (default: sub-01 to sub-10)')    
     args = parser.parse_args()
 
     # Set device based on the argument
@@ -383,15 +388,14 @@ def main():
         device = torch.device(args.gpu)
     else:
         device = torch.device('cpu')
-
-    subjects = args.subjects        
+      
     current_time = datetime.datetime.now().strftime("%m-%d_%H-%M")
 
-    for sub in subjects:
+    for sub in args.subjects:
         eeg_model = globals()[args.encoder_type]()
         eeg_model.to(device)
 
-        optimizer = AdamW(itertools.chain(eeg_model.parameters()), lr=args.lr,weight_decay=1e-4)
+        optimizer = AdamW(eeg_model.parameters(), lr=args.lr, weight_decay=1e-4)
 
         if args.insubject:
             train_dataset = EEGDataset(args.data_path, subjects=[sub], train=True)
@@ -401,7 +405,7 @@ def main():
             test_dataset = EEGDataset(args.data_path, exclude_subject=sub, subjects=subjects, train=False)
 
         train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
-        test_loader = DataLoader(test_dataset, batch_size=1, shuffle=True, num_workers=0, drop_last=True)
+        test_loader = DataLoader(test_dataset, batch_size=1, shuffle=True, num_workers=0, drop_last=False)
 
         text_features_train_all = train_dataset.text_features
         text_features_test_all = test_dataset.text_features
