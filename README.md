@@ -1,4 +1,4 @@
-# STAMBRIDGE: Spectral-Temporal Adaptive Mid-Feature Bridge for Stable EEG Visual Decoding
+# STAMBRIDGE: Spectral-Temporal Adaptive Mid-Feature Bridge for EEG Visual Decoding
 
 <div align="center">
 <img src="imgs/fig_overall.png" alt="STAMBRIDGE Framework" style="max-width: 90%; height: auto;"/>
