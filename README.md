@@ -1,4 +1,4 @@
-# STAMBRIDGE: Spectral-Temporal Adaptive Mid-Feature Bridge for EEG Visual Decoding
+# STAMBRIDGE: Spectral-Temporal Amplitude-aware Mid-Feature Bridge for EEG Visual Decoding
 
 <div align="center">
 <img src="imgs/fig_overall.png" alt="STAMBRIDGE Framework" style="max-width: 90%; height: auto;"/>
@@ -8,7 +8,7 @@
 ## 📖 Abstract
 
 Electroencephalography (EEG) visual decoding remains challenging due to the modality gap between low-SNR neural signals and highly structured vision-language spaces. To address this, we propose **STAMBRIDGE**, a versatile two-stage framework that sequentially tackles feature conditioning and cross-modal alignment:
-1. **Spectral-Temporal Amplitude-aware Modulation (STAM):** Replaces hard frequency masking with amplitude-derived soft channel weighting and multi-scale temporal convolutions, explicitly preserving frequency-aware transients while avoiding time-domain ringing artifacts.
+1. **Spectral-Temporal Amplitude-aware Modulation (STAM):** Replaces hard frequency masking with an adaptive channel modulation strategy that utilizes frequency-domain amplitude as informative priors. This explicitly preserves frequency-aware neural transients while protecting against time-domain ringing artifacts.
 2. **Mid-Feature Semantic Bridge (MFSB):** A model-agnostic module that constructs a regularized intermediate space through directed cross-modal interactions, enabling staged distillation and more stable semantic alignment.
 
 STAMBRIDGE achieves state-of-the-art 200-way zero-shot retrieval performance on the THINGS-EEG benchmark, with **34.50% Top-1** and **65.95% Top-5** accuracy. 
@@ -102,7 +102,7 @@ This stage performs qualitative image reconstruction using:
 the extracted EEG semantic embeddings
 the diffusion prior
 the customized generation pipeline
-
+Note: To ensure rigorous benchmarking and prevent overfitting during the visual reconstruction phase, our generative pipeline is deliberately designed to utilize only the high-level semantic branch, omitting low-level pixel regression.
 The generated images will be saved automatically to the output directory.
 ## 🙏 Acknowledgements
 
